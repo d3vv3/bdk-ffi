@@ -18,7 +18,7 @@ rustup target add $COMPILATION_TARGET_ARM64_V8A
 
 # Build the binaries
 # The CC and CARGO_TARGET_<TARGET>_LINUX_ANDROID_LINKER environment variables must be declared on the same line as the cargo build command
-CC="aarch64-linux-android24-clang" CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="aarch64-linux-android24-clang" cargo build --target $COMPILATION_TARGET_ARM64_V8A
+CC="aarch64-linux-android24-clang" CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="aarch64-linux-android24-clang" cargo build --target $COMPILATION_TARGET_ARM64_V8A --features encrypted-sqlite
 
 # Copy the binaries to their respective resource directories
 mkdir -p ../bdk-android/lib/src/main/jniLibs/$RESOURCE_DIR_ARM64_V8A/

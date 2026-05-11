@@ -22,9 +22,9 @@ rustup target add $COMPILATION_TARGET_ARM64_V8A $COMPILATION_TARGET_ARMEABI_V7A 
 
 # Build the binaries
 # The CC and CARGO_TARGET_<TARGET>_LINUX_ANDROID_LINKER environment variables must be declared on the same line as the cargo build command
-CC="aarch64-linux-android24-clang" CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="aarch64-linux-android24-clang" cargo build --profile release-smaller --target $COMPILATION_TARGET_ARM64_V8A
-CC="x86_64-linux-android24-clang" CARGO_TARGET_X86_64_LINUX_ANDROID_LINKER="x86_64-linux-android24-clang" cargo build --profile release-smaller --target $COMPILATION_TARGET_X86_64
-CC="armv7a-linux-androideabi24-clang" CARGO_TARGET_ARMV7_LINUX_ANDROIDEABI_LINKER="armv7a-linux-androideabi24-clang" cargo build --profile release-smaller --target $COMPILATION_TARGET_ARMEABI_V7A
+CC="aarch64-linux-android24-clang" CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="aarch64-linux-android24-clang" cargo build --profile release-smaller --target $COMPILATION_TARGET_ARM64_V8A --features encrypted-sqlite
+CC="x86_64-linux-android24-clang" CARGO_TARGET_X86_64_LINUX_ANDROID_LINKER="x86_64-linux-android24-clang" cargo build --profile release-smaller --target $COMPILATION_TARGET_X86_64 --features encrypted-sqlite
+CC="armv7a-linux-androideabi24-clang" CARGO_TARGET_ARMV7_LINUX_ANDROIDEABI_LINKER="armv7a-linux-androideabi24-clang" cargo build --profile release-smaller --target $COMPILATION_TARGET_ARMEABI_V7A --features encrypted-sqlite
 
 # Copy the binaries to their respective resource directories
 mkdir -p ../bdk-android/lib/src/main/jniLibs/$RESOURCE_DIR_ARM64_V8A/
