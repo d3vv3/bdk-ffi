@@ -14,9 +14,14 @@ name = "bdkffi"
 name = "uniffi-bindgen"
 path = "uniffi-bindgen.rs"
 
+[features]
+# Enable SQLCipher-backed encrypted SQLite storage (Persister::new_sqlite_encrypted).
+# Adds a vendored OpenSSL + SQLCipher build; increases binary size significantly.
+encrypted-sqlite = ["rusqlite/bundled-sqlcipher-vendored-openssl"]
+
 [dependencies]
 bdk_wallet = { version = "2.3.0", features = ["all-keys", "keys-bip39", "rusqlite"] }
-rusqlite = { version = "0.31", features = ["bundled-sqlcipher-vendored-openssl"] }
+rusqlite = { version = "0.31", optional = true }
 bdk_esplora = { version = "0.22.1", default-features = false, features = ["std", "blocking", "blocking-https-rustls"] }
 bdk_electrum = { version = "0.23.2", default-features = false, features = ["use-rustls-ring"] }
 bdk_kyoto = { version = "0.15.3" }

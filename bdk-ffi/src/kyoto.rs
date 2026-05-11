@@ -56,7 +56,7 @@ pub struct CbfClient {
     info_rx: std::sync::Mutex<Receiver<bdk_kyoto::Info>>,
     warning_rx: std::sync::Mutex<UnboundedReceiver<bdk_kyoto::Warning>>,
     update_rx: std::sync::Mutex<UpdateSubscriber>,
-    /// Shared Tokio runtime — the same one the CbfNode runs on.
+    /// Tokio runtime used to drive async channel operations from blocking UniFFI calls.
     runtime: Arc<tokio::runtime::Runtime>,
 }
 
@@ -78,8 +78,9 @@ pub struct CbfNode {
 #[uniffi::export]
 impl CbfNode {
     /// Start the node on a detached OS thread and immediately return.
-    /// The runtime is shared with the CbfClient so that client methods
-    /// can block_on the same runtime without needing a Tokio context.
+    /// The node runs on its own Tokio runtime. The [`CbfClient`] uses a separate
+    /// runtime to drive its blocking channel calls — Tokio channels are cross-runtime
+    /// compatible so this works correctly.
     pub fn run(self: Arc<Self>) {
         let mut lock = self.node.lock().unwrap();
         let node = lock.take().expect("cannot call run more than once");
@@ -216,11 +217,23 @@ impl CbfBuilder {
                     },
                     RecoveryPoint::SegwitActivation => bdk_kyoto::ScanType::Recovery {
                         used_script_index,
-                        checkpoint: HeaderCheckpoint::segwit_activation(),
+                        // HeaderCheckpoint::segwit_activation() is mainnet-only (height 481,823).
+                        // Fall back to genesis for other networks to avoid a meaningless checkpoint.
+                        checkpoint: if wallet.network() == Network::Bitcoin {
+                            HeaderCheckpoint::segwit_activation()
+                        } else {
+                            HeaderCheckpoint::from_genesis(wallet.network())
+                        },
                     },
                     RecoveryPoint::TaprootActivation => bdk_kyoto::ScanType::Recovery {
                         used_script_index,
-                        checkpoint: HeaderCheckpoint::taproot_activation(),
+                        // HeaderCheckpoint::taproot_activation() is mainnet-only (height 709,631).
+                        // Fall back to genesis for other networks to avoid a meaningless checkpoint.
+                        checkpoint: if wallet.network() == Network::Bitcoin {
+                            HeaderCheckpoint::taproot_activation()
+                        } else {
+                            HeaderCheckpoint::from_genesis(wallet.network())
+                        },
                     },
                     RecoveryPoint::Other { birthday } => bdk_kyoto::ScanType::Recovery {
                         used_script_index,
@@ -263,9 +276,10 @@ impl CbfBuilder {
             node: std::sync::Mutex::new(Some(node)),
         };
 
-        // Create a shared multi-thread Tokio runtime. The node runs on a separate
-        // OS thread (via CbfNode::run) but the client methods need to block_on
-        // the same (or a compatible) runtime to drive the tokio channels.
+        // Create a dedicated multi-thread Tokio runtime for the CbfClient. The node runs on a
+        // separate OS thread with its own runtime (see CbfNode::run). Tokio channels are
+        // cross-runtime compatible, so client methods can block_on this runtime to drive
+        // channel receives even though the node runs on a different runtime.
         let runtime = Arc::new(
             tokio::runtime::Builder::new_multi_thread()
                 .enable_all()

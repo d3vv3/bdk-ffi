@@ -43,8 +43,16 @@ impl Persister {
     /// The `key` is passed directly to SQLCipher via `PRAGMA key`. It must be a non-empty
     /// string. The database file will be created (and encrypted) on first open, and the same
     /// key must be supplied on every subsequent open.
+    ///
+    /// This constructor is only available when the `encrypted-sqlite` Cargo feature is enabled.
+    #[cfg(feature = "encrypted-sqlite")]
     #[uniffi::constructor]
     pub fn new_sqlite_encrypted(path: String, key: String) -> Result<Self, PersistenceError> {
+        if key.is_empty() {
+            return Err(PersistenceError::Reason {
+                error_message: "encryption key must not be empty".into(),
+            });
+        }
         let conn = BdkConnection::open(&path)?;
         conn.execute_batch(&format!("PRAGMA key = '{}';", key.replace('\'', "''")))
             .map_err(|e| PersistenceError::Reason { error_message: e.to_string() })?;
