@@ -38,6 +38,21 @@ impl Persister {
         })
     }
 
+    /// Create a new encrypted Sqlite connection at the specified file path.
+    ///
+    /// The `key` is passed directly to SQLCipher via `PRAGMA key`. It must be a non-empty
+    /// string. The database file will be created (and encrypted) on first open, and the same
+    /// key must be supplied on every subsequent open.
+    #[uniffi::constructor]
+    pub fn new_sqlite_encrypted(path: String, key: String) -> Result<Self, PersistenceError> {
+        let conn = BdkConnection::open(&path)?;
+        conn.execute_batch(&format!("PRAGMA key = '{}';", key.replace('\'', "''")))
+            .map_err(|e| PersistenceError::Reason { error_message: e.to_string() })?;
+        Ok(Self {
+            inner: PersistenceType::Sql(conn.into()).into(),
+        })
+    }
+
     /// Create a new connection in memory.
     #[uniffi::constructor]
     pub fn new_in_memory() -> Result<Self, PersistenceError> {

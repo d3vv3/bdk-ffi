@@ -22,7 +22,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::sync::Mutex;
-
 use crate::bitcoin::BlockHash;
 use crate::bitcoin::Transaction;
 use crate::bitcoin::Wtxid;
@@ -47,12 +46,24 @@ pub struct CbfComponents {
 }
 
 /// A [`CbfClient`] handles wallet updates from a [`CbfNode`].
-#[derive(Debug, uniffi::Object)]
+///
+/// All async Rust methods are exposed as blocking calls via a shared Tokio runtime.
+/// This avoids the "no reactor running" panic that occurs when UniFFI's async bridge
+/// tries to poll a Tokio future from a thread that has no Tokio runtime context.
+#[derive(uniffi::Object)]
 pub struct CbfClient {
     sender: Arc<Requester>,
-    info_rx: Mutex<Receiver<bdk_kyoto::Info>>,
-    warning_rx: Mutex<UnboundedReceiver<bdk_kyoto::Warning>>,
-    update_rx: Mutex<UpdateSubscriber>,
+    info_rx: std::sync::Mutex<Receiver<bdk_kyoto::Info>>,
+    warning_rx: std::sync::Mutex<UnboundedReceiver<bdk_kyoto::Warning>>,
+    update_rx: std::sync::Mutex<UpdateSubscriber>,
+    /// Shared Tokio runtime — the same one the CbfNode runs on.
+    runtime: Arc<tokio::runtime::Runtime>,
+}
+
+impl std::fmt::Debug for CbfClient {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CbfClient").finish()
+    }
 }
 
 /// A [`CbfNode`] gathers transactions for a [`Wallet`].
@@ -67,6 +78,8 @@ pub struct CbfNode {
 #[uniffi::export]
 impl CbfNode {
     /// Start the node on a detached OS thread and immediately return.
+    /// The runtime is shared with the CbfClient so that client methods
+    /// can block_on the same runtime without needing a Tokio context.
     pub fn run(self: Arc<Self>) {
         let mut lock = self.node.lock().unwrap();
         let node = lock.take().expect("cannot call run more than once");
@@ -192,32 +205,27 @@ impl CbfBuilder {
                 used_script_index,
                 checkpoint,
             } => {
-                let network = wallet.network();
-                // Any other network has taproot and segwit baked in since the genesis block.
-                if !matches!(network, Network::Bitcoin) {
-                    bdk_kyoto::ScanType::Recovery {
+                // Use the caller-supplied checkpoint for all networks.
+                // Previously this block ignored `checkpoint` for non-mainnet networks and
+                // always fell back to genesis, causing Kyoto to re-sync from block 0 on
+                // every restart on signet/testnet.
+                match checkpoint {
+                    RecoveryPoint::GenesisBlock => bdk_kyoto::ScanType::Recovery {
                         used_script_index,
-                        checkpoint: HeaderCheckpoint::from_genesis(network),
-                    }
-                } else {
-                    match checkpoint {
-                        RecoveryPoint::GenesisBlock => bdk_kyoto::ScanType::Recovery {
-                            used_script_index,
-                            checkpoint: HeaderCheckpoint::from_genesis(wallet.network()),
-                        },
-                        RecoveryPoint::SegwitActivation => bdk_kyoto::ScanType::Recovery {
-                            used_script_index,
-                            checkpoint: HeaderCheckpoint::segwit_activation(),
-                        },
-                        RecoveryPoint::TaprootActivation => bdk_kyoto::ScanType::Recovery {
-                            used_script_index,
-                            checkpoint: HeaderCheckpoint::taproot_activation(),
-                        },
-                        RecoveryPoint::Other { birthday } => bdk_kyoto::ScanType::Recovery {
-                            used_script_index,
-                            checkpoint: HeaderCheckpoint::new(birthday.height, birthday.hash.0),
-                        },
-                    }
+                        checkpoint: HeaderCheckpoint::from_genesis(wallet.network()),
+                    },
+                    RecoveryPoint::SegwitActivation => bdk_kyoto::ScanType::Recovery {
+                        used_script_index,
+                        checkpoint: HeaderCheckpoint::segwit_activation(),
+                    },
+                    RecoveryPoint::TaprootActivation => bdk_kyoto::ScanType::Recovery {
+                        used_script_index,
+                        checkpoint: HeaderCheckpoint::taproot_activation(),
+                    },
+                    RecoveryPoint::Other { birthday } => bdk_kyoto::ScanType::Recovery {
+                        used_script_index,
+                        checkpoint: HeaderCheckpoint::new(birthday.height, birthday.hash.0),
+                    },
                 }
             }
         };
@@ -255,11 +263,22 @@ impl CbfBuilder {
             node: std::sync::Mutex::new(Some(node)),
         };
 
+        // Create a shared multi-thread Tokio runtime. The node runs on a separate
+        // OS thread (via CbfNode::run) but the client methods need to block_on
+        // the same (or a compatible) runtime to drive the tokio channels.
+        let runtime = Arc::new(
+            tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+                .expect("failed to build Tokio runtime for CbfClient"),
+        );
+
         let client = CbfClient {
             sender: Arc::new(requester),
-            info_rx: Mutex::new(info_subscriber),
-            warning_rx: Mutex::new(warning_subscriber),
-            update_rx: Mutex::new(update_subscriber),
+            info_rx: std::sync::Mutex::new(info_subscriber),
+            warning_rx: std::sync::Mutex::new(warning_subscriber),
+            update_rx: std::sync::Mutex::new(update_subscriber),
+            runtime,
         };
 
         CbfComponents {
@@ -272,69 +291,79 @@ impl CbfBuilder {
 #[uniffi::export]
 impl CbfClient {
     /// Return the next available info message from a node. If none is returned, the node has stopped.
-    pub async fn next_info(&self) -> Result<Info, CbfError> {
-        let mut info_rx = self.info_rx.lock().await;
-        info_rx
-            .recv()
-            .await
-            .map(|e| e.into())
-            .ok_or(CbfError::NodeStopped)
+    pub fn next_info(&self) -> Result<Info, CbfError> {
+        let mut info_rx = self.info_rx.lock().unwrap();
+        self.runtime.block_on(async {
+            info_rx
+                .recv()
+                .await
+                .map(|e| e.into())
+                .ok_or(CbfError::NodeStopped)
+        })
     }
 
     /// Return the next available warning message from a node. If none is returned, the node has stopped.
-    pub async fn next_warning(&self) -> Result<Warning, CbfError> {
-        let mut warn_rx = self.warning_rx.lock().await;
-        warn_rx
-            .recv()
-            .await
-            .map(|warn| warn.into())
-            .ok_or(CbfError::NodeStopped)
+    pub fn next_warning(&self) -> Result<Warning, CbfError> {
+        let mut warn_rx = self.warning_rx.lock().unwrap();
+        self.runtime.block_on(async {
+            warn_rx
+                .recv()
+                .await
+                .map(|warn| warn.into())
+                .ok_or(CbfError::NodeStopped)
+        })
     }
 
     /// Return an [`Update`]. This is method returns once the node syncs to the rest of
     /// the network or a new block has been gossiped.
-    pub async fn update(&self) -> Result<Update, CbfError> {
-        let update = self
-            .update_rx
-            .lock()
-            .await
-            .update()
-            .await
-            .map_err(|_| CbfError::NodeStopped)?;
-        Ok(Update(update))
+    pub fn update(&self) -> Result<Update, CbfError> {
+        let mut update_rx = self.update_rx.lock().unwrap();
+        self.runtime.block_on(async {
+            update_rx
+                .update()
+                .await
+                .map(Update)
+                .map_err(|_| CbfError::NodeStopped)
+        })
     }
 
     /// Broadcast a transaction to the network, erroring if the node has stopped running.
-    pub async fn broadcast(&self, transaction: &Transaction) -> Result<Arc<Wtxid>, CbfError> {
+    pub fn broadcast(&self, transaction: &Transaction) -> Result<Arc<Wtxid>, CbfError> {
         let tx = transaction.into();
-        self.sender
-            .broadcast_random(tx)
-            .await
-            .map_err(From::from)
-            .map(|wtxid| Arc::new(Wtxid(wtxid)))
+        self.runtime.block_on(async {
+            self.sender
+                .broadcast_random(tx)
+                .await
+                .map_err(From::from)
+                .map(|wtxid| Arc::new(Wtxid(wtxid)))
+        })
     }
 
     /// The minimum fee rate required to broadcast a transcation to all connected peers.
-    pub async fn min_broadcast_feerate(&self) -> Result<Arc<FeeRate>, CbfError> {
-        self.sender
-            .broadcast_min_feerate()
-            .await
-            .map_err(|_| CbfError::NodeStopped)
-            .map(|fee| Arc::new(FeeRate(fee)))
+    pub fn min_broadcast_feerate(&self) -> Result<Arc<FeeRate>, CbfError> {
+        self.runtime.block_on(async {
+            self.sender
+                .broadcast_min_feerate()
+                .await
+                .map_err(|_| CbfError::NodeStopped)
+                .map(|fee| Arc::new(FeeRate(fee)))
+        })
     }
 
     /// Fetch the average fee rate for a block by requesting it from a peer. Not recommend for
     /// resource-limited devices.
-    pub async fn average_fee_rate(
+    pub fn average_fee_rate(
         &self,
         blockhash: Arc<BlockHash>,
     ) -> Result<Arc<FeeRate>, CbfError> {
-        let fee_rate = self
-            .sender
-            .average_fee_rate(blockhash.0)
-            .await
-            .map_err(|_| CbfError::NodeStopped)?;
-        Ok(Arc::new(fee_rate.into()))
+        self.runtime.block_on(async {
+            let fee_rate = self
+                .sender
+                .average_fee_rate(blockhash.0)
+                .await
+                .map_err(|_| CbfError::NodeStopped)?;
+            Ok(Arc::new(fee_rate.into()))
+        })
     }
 
     /// Add another [`Peer`] to attempt a connection with.
